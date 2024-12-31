@@ -18,10 +18,10 @@
 #include <string>
 #include <iphlpapi.h>
 #include <map>
-#include <vector>
 #include <algorithm>
+#include <filesystem>
 
-std::map<int, int> counter; 
+std::map<int, int> counter;
 
 void WINAPI OnEvent(PEVENT_RECORD pEventRecord)
 {
@@ -40,7 +40,7 @@ void WINAPI OnEvent(PEVENT_RECORD pEventRecord)
 	}
 }
 
-int main()
+std::vector<std::pair<int, int>> processFile(std::string filePath)
 {
 	// https://github.com/piotrsmolinski/wireshark/blob/7fdaac735a6a4fb08c9e60ab27d67ad126a2dab1/extcap/etl.c#L287
 
@@ -52,60 +52,85 @@ int main()
 	// this thing has the ability to read from ETL files as well as trace real time. We want real time. 
 	traceSession.ProcessTraceMode = PROCESS_TRACE_MODE_EVENT_RECORD;
 	// this is either the session name, or the path of the log file we're reading. 
-	traceSession.LogFileName = (LPSTR)"C:\\Users\\ben\\Desktop\\recorings\\bad\\Intel-GFX-Info_000001.etl";
+	traceSession.LogFileName = (LPSTR)filePath.c_str();
 	// this is the callback. 
 	traceSession.EventRecordCallback = (PEVENT_RECORD_CALLBACK)OnEvent;
 
-	// now we're going to initialize structures to start the tracing session. 
-	//
-	// we're going to heap alloc this, so lets get the size. should be the size of the structure + my name. 
-	// the extra char at the end allows for null termination. 
-	ULONG tracePropertiesBufferSize = sizeof(EVENT_TRACE_PROPERTIES) + sizeof(traceSession.LogFileName) + sizeof(CHAR);
-	// heap alloc on local heap. 
-	PEVENT_TRACE_PROPERTIES ptrEventTraceProps = (PEVENT_TRACE_PROPERTIES)::LocalAlloc(LPTR, tracePropertiesBufferSize);
-	if (ptrEventTraceProps)
+	auto traceHandle = OpenTraceA(&traceSession);
+
+	if (traceHandle != INVALID_PROCESSTRACE_HANDLE)
 	{
-		::ZeroMemory(ptrEventTraceProps, tracePropertiesBufferSize);
-
-		// WNODE information. 
-		// https://learn.microsoft.com/en-us/windows/win32/etw/wnode-header
-		ptrEventTraceProps->Wnode.BufferSize = tracePropertiesBufferSize;
-		ptrEventTraceProps->Wnode.ClientContext = 2;
-		ptrEventTraceProps->Wnode.Flags = WNODE_FLAG_TRACED_GUID;
-
-		// EVENT_TRACE_PROPERTIES information. 
-		// https://learn.microsoft.com/en-us/windows/win32/api/evntrace/ns-evntrace-event_trace_properties
-		// https://learn.microsoft.com/en-us/windows/win32/etw/logging-mode-constants
-		ptrEventTraceProps->LogFileMode = EVENT_TRACE_REAL_TIME_MODE;
-		ptrEventTraceProps->LoggerNameOffset = sizeof(EVENT_TRACE_PROPERTIES);
-
-		// start the tracing session. 
-		//TRACEHANDLE startTraceHandle;
-		//auto response = ::StartTraceA(&startTraceHandle, traceSession.LogFileName, ptrEventTraceProps);
-		//if (response == ERROR_SUCCESS)
-		//{
-		//	::StopTraceA(startTraceHandle, traceSession.LogFileName, ptrEventTraceProps);
-		//}
-		auto traceHandle = OpenTraceA(&traceSession); 
-		if (traceHandle != INVALID_PROCESSTRACE_HANDLE)
+		counter.clear(); 
+		auto err = ProcessTrace(&traceHandle, 1, 0, 0);
+		if (err == ERROR_SUCCESS)
 		{
-			auto err = ProcessTrace(&traceHandle, 1, 0, 0); 
-			if (err == ERROR_SUCCESS)
-			{
-				std::vector<std::pair<int,int>> pairs(counter.begin(), counter.end()); 
+			std::vector<std::pair<int, int>> pairs(counter.begin(), counter.end());
 
-				std::sort(pairs.begin(), pairs.end(), [](const auto& a, const auto& b)
-					{
-						return a.second > b.second; 
-					}); 
-
-				for (auto it : pairs)
+			std::sort(pairs.begin(), pairs.end(), [](const auto& a, const auto& b)
 				{
-					std::cout << it.first << ":" << it.second << std::endl;
-				}
+					return a.second > b.second;
+				});
 
-				getchar(); 
-			}
+			return pairs; 
 		}
 	}
+	else
+	{
+		HRESULT hr = GetLastError();
+		printf("%d\n", hr); 
+	}
+
+	return std::vector<std::pair<int, int>>(); 
+}
+
+std::map<std::string, std::vector<std::pair<int, int>>> ProcessDirectory(std::string directory)
+{
+	std::map<std::string, std::vector<std::pair<int, int>>> result;
+
+	for (auto file : std::filesystem::directory_iterator(directory))
+	{
+		auto filePath = file.path().string(); 
+		auto fileResults = processFile(filePath);
+
+		result.insert(std::pair<std::string, std::vector<std::pair<int, int>>>(filePath, fileResults));
+	}
+
+	return result;
+}
+
+void ProcessResults(std::map<std::string, std::vector<std::pair<int, int>>> results, std::string outputDir)
+{
+	if (!outputDir.ends_with('\\'))
+	{
+		outputDir += "\\"; 
+	}
+
+	for (auto result : results)
+	{
+		std::string fileName = result.first; 
+		fileName = fileName.substr(fileName.find_last_of('\\') + 1); 
+
+		std::ofstream fout(outputDir + fileName + ".csv");
+
+		for (auto row : result.second)
+		{
+			fout << row.first << "," << row.second << std::endl; 
+		}
+
+		fout.flush(); 
+		fout.close(); 
+	}
+}
+
+
+int main()
+{
+	std::string badPath = "C:\\Users\\ben\\Desktop\\ETW work\\311-bad-gpu\\writeDir"; 
+	std::string goodPath = "C:\\Users\\ben\\Desktop\\ETW work\\537-GPU-Good\\writeDir"; 
+
+	auto badDirResults = ProcessDirectory(badPath); 
+	auto goodDirResults = ProcessDirectory(goodPath);
+
+	ProcessResults(badDirResults, "C:\\Users\\ben\\Desktop\\ETW work\\311-bad-gpu\\processed"); 
+	ProcessResults(goodDirResults, "C:\\Users\\ben\\Desktop\\ETW work\\537-GPU-Good\\processed");
 }
